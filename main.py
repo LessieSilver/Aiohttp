@@ -1,12 +1,74 @@
 import json
+import asyncio
+import datetime
 from aiohttp import web
 
-ads_db = {}
-next_id = 1
+
+class AdsStorage:
+
+    def __init__(self):
+        self._data = {}
+        self._next_id = 1
+        self._lock = asyncio.Lock()
+
+    async def get_all(self):
+        async with self._lock:
+            return list(self._data.values())
+
+    async def get_by_id(self, ad_id):
+        async with self._lock:
+            return self._data.get(ad_id)
+
+    async def create(self, data):
+        async with self._lock:
+            ad = {
+                "id": self._next_id,
+                "title": data["title"],
+                "description": data["description"],
+                "owner": data["owner"],
+                "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+            }
+            self._data[self._next_id] = ad
+            self._next_id += 1
+            return ad
+
+    async def update(self, ad_id, data):
+        async with self._lock:
+            if ad_id not in self._data:
+                return None
+            self._data[ad_id].update(data)
+            return self._data[ad_id]
+
+    async def delete(self, ad_id):
+        async with self._lock:
+            if ad_id not in self._data:
+                return False
+            del self._data[ad_id]
+            return True
+
+
+storage = AdsStorage()
+
+
+def validate_ad_data(data, required_fields=None):
+    if required_fields is None:
+        required_fields = ["title", "description", "owner"]
+
+    for field in required_fields:
+        if field not in data:
+            return False, f"Missing field: {field}"
+
+    for field in ["title", "description", "owner"]:
+        if field in data:
+            if not isinstance(data[field], str) or not data[field].strip():
+                return False, f"Field '{field}' must be a non-empty string"
+
+    return True, None
 
 
 async def get_ads(request: web.Request) -> web.Response:
-    return web.json_response(list(ads_db.values()))
+    ads = await storage.get_all()
+    return web.json_response(ads)
 
 
 async def get_ad(request: web.Request) -> web.Response:
@@ -15,38 +77,25 @@ async def get_ad(request: web.Request) -> web.Response:
     except ValueError:
         return web.json_response({"error": "Invalid ID"}, status=400)
 
-    if ad_id not in ads_db:
+    ad = await storage.get_by_id(ad_id)
+    if not ad:
         return web.json_response({"error": "Ad not found"}, status=404)
 
-    return web.json_response(ads_db[ad_id])
+    return web.json_response(ad)
 
 
 async def create_ad(request: web.Request) -> web.Response:
-    global next_id
-
     try:
         body = await request.text()
         data = json.loads(body)
     except json.JSONDecodeError as e:
         return web.json_response({"error": f"Invalid JSON: {str(e)}"}, status=400)
-    except Exception as e:
-        return web.json_response({"error": f"Error: {str(e)}"}, status=400)
 
-    required_fields = ["title", "description", "owner"]
-    for field in required_fields:
-        if field not in data:
-            return web.json_response({"error": f"Missing field: {field}"}, status=400)
+    is_valid, error_msg = validate_ad_data(data, required_fields=["title", "description", "owner"])
+    if not is_valid:
+        return web.json_response({"error": error_msg}, status=400)
 
-    ad = {
-        "id": next_id,
-        "title": data["title"],
-        "description": data["description"],
-        "owner": data["owner"]
-    }
-
-    ads_db[next_id] = ad
-    next_id += 1
-
+    ad = await storage.create(data)
     return web.json_response(ad, status=201)
 
 
@@ -56,7 +105,8 @@ async def update_ad(request: web.Request) -> web.Response:
     except ValueError:
         return web.json_response({"error": "Invalid ID"}, status=400)
 
-    if ad_id not in ads_db:
+    existing = await storage.get_by_id(ad_id)
+    if not existing:
         return web.json_response({"error": "Ad not found"}, status=404)
 
     try:
@@ -64,11 +114,13 @@ async def update_ad(request: web.Request) -> web.Response:
         data = json.loads(body)
     except json.JSONDecodeError as e:
         return web.json_response({"error": f"Invalid JSON: {str(e)}"}, status=400)
-    except Exception as e:
-        return web.json_response({"error": f"Error: {str(e)}"}, status=400)
 
-    ads_db[ad_id].update(data)
-    return web.json_response(ads_db[ad_id])
+    is_valid, error_msg = validate_ad_data(data, required_fields=[])
+    if not is_valid:
+        return web.json_response({"error": error_msg}, status=400)
+
+    ad = await storage.update(ad_id, data)
+    return web.json_response(ad)
 
 
 async def delete_ad(request: web.Request) -> web.Response:
@@ -77,10 +129,10 @@ async def delete_ad(request: web.Request) -> web.Response:
     except ValueError:
         return web.json_response({"error": "Invalid ID"}, status=400)
 
-    if ad_id not in ads_db:
+    deleted = await storage.delete(ad_id)
+    if not deleted:
         return web.json_response({"error": "Ad not found"}, status=404)
 
-    del ads_db[ad_id]
     return web.json_response({"status": "deleted"})
 
 
