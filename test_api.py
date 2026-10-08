@@ -25,7 +25,11 @@ with urllib.request.urlopen(f"{BASE_URL}/{ad_id}") as response:
     print(response.read().decode('utf-8'))
 
 print(f"\n4. Редактируем объявление {ad_id} (PUT):")
-update_data = json.dumps({"title": "Продам горный велосипед (скидка!)"}).encode('utf-8')
+update_data = json.dumps({
+    "title": "Продам горный велосипед (скидка!)",
+    "description": "Новый, горный, черный",
+    "owner": "Иван Иванов"
+}).encode('utf-8')
 req_put = urllib.request.Request(f"{BASE_URL}/{ad_id}", data=update_data, headers={'Content-Type': 'application/json'}, method='PUT')
 with urllib.request.urlopen(req_put) as response:
     print(response.read().decode('utf-8'))

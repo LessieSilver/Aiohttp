@@ -1,67 +1,86 @@
 import json
-import asyncio
 import datetime
+import aiosqlite
 from aiohttp import web
+
+DB_PATH = "ads.db"
 
 
 class AdsStorage:
 
-    def __init__(self):
-        self._data = {}
-        self._next_id = 1
-        self._lock = asyncio.Lock()
+    def __init__(self, db_path):
+        self.db_path = db_path
+
+    async def init_db(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS ads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    owner TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            await db.commit()
 
     async def get_all(self):
-        async with self._lock:
-            return list(self._data.values())
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM ads")
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
     async def get_by_id(self, ad_id):
-        async with self._lock:
-            return self._data.get(ad_id)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM ads WHERE id = ?", (ad_id,))
+            row = await cursor.fetchone()
+            return dict(row) if row else None
 
     async def create(self, data):
-        async with self._lock:
-            ad = {
-                "id": self._next_id,
+        created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "INSERT INTO ads (title, description, owner, created_at) VALUES (?, ?, ?, ?)",
+                (data["title"], data["description"], data["owner"], created_at)
+            )
+            await db.commit()
+            return {
+                "id": cursor.lastrowid,
                 "title": data["title"],
                 "description": data["description"],
                 "owner": data["owner"],
-                "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                "created_at": created_at
             }
-            self._data[self._next_id] = ad
-            self._next_id += 1
-            return ad
 
     async def update(self, ad_id, data):
-        async with self._lock:
-            if ad_id not in self._data:
-                return None
-            self._data[ad_id].update(data)
-            return self._data[ad_id]
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE ads SET title = ?, description = ?, owner = ? WHERE id = ?",
+                (data["title"], data["description"], data["owner"], ad_id)
+            )
+            await db.commit()
+        return await self.get_by_id(ad_id)
 
     async def delete(self, ad_id):
-        async with self._lock:
-            if ad_id not in self._data:
-                return False
-            del self._data[ad_id]
-            return True
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("DELETE FROM ads WHERE id = ?", (ad_id,))
+            await db.commit()
+            return cursor.rowcount > 0
 
 
-storage = AdsStorage()
+storage = AdsStorage(DB_PATH)
 
 
-def validate_ad_data(data, required_fields=None):
-    if required_fields is None:
-        required_fields = ["title", "description", "owner"]
+def validate_ad_data(data):
+    required_fields = ["title", "description", "owner"]
 
     for field in required_fields:
         if field not in data:
-            return False, f"Missing field: {field}"
-
-    for field in ["title", "description", "owner"]:
-        if field in data:
-            if not isinstance(data[field], str) or not data[field].strip():
-                return False, f"Field '{field}' must be a non-empty string"
+            return False, f"Missing required field: {field}"
+        if not isinstance(data[field], str) or not data[field].strip():
+            return False, f"Field '{field}' must be a non-empty string"
 
     return True, None
 
@@ -91,7 +110,7 @@ async def create_ad(request: web.Request) -> web.Response:
     except json.JSONDecodeError as e:
         return web.json_response({"error": f"Invalid JSON: {str(e)}"}, status=400)
 
-    is_valid, error_msg = validate_ad_data(data, required_fields=["title", "description", "owner"])
+    is_valid, error_msg = validate_ad_data(data)
     if not is_valid:
         return web.json_response({"error": error_msg}, status=400)
 
@@ -115,7 +134,7 @@ async def update_ad(request: web.Request) -> web.Response:
     except json.JSONDecodeError as e:
         return web.json_response({"error": f"Invalid JSON: {str(e)}"}, status=400)
 
-    is_valid, error_msg = validate_ad_data(data, required_fields=[])
+    is_valid, error_msg = validate_ad_data(data)
     if not is_valid:
         return web.json_response({"error": error_msg}, status=400)
 
@@ -136,8 +155,15 @@ async def delete_ad(request: web.Request) -> web.Response:
     return web.json_response({"status": "deleted"})
 
 
+async def on_startup(app):
+    await storage.init_db()
+    print("База данных инициализирована")
+
+
 def init_app() -> web.Application:
     app = web.Application()
+
+    app.on_startup.append(on_startup)
 
     app.router.add_get('/ads', get_ads)
     app.router.add_get('/ads/{id}', get_ad)
